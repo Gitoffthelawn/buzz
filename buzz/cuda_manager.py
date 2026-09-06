@@ -66,12 +66,21 @@ def is_flatpak() -> bool:
     return "FLATPAK_ID" in os.environ
 
 
+def is_appimage() -> bool:
+    """Returns True if running from an AppImage.
+
+    AppRun exports APPIMAGE (path to the .AppImage) and APPDIR (the mount
+    point) before launching Buzz.
+    """
+    return "APPIMAGE" in os.environ and "APPDIR" in os.environ
+
+
 def should_offer_cuda_prompt() -> bool:
     """Returns True on platforms where in-app CUDA installation is supported."""
     if sys.platform == "win32":
         return True
     if sys.platform == "linux":
-        return is_snap() or is_flatpak()
+        return is_snap() or is_flatpak() or is_appimage()
     return False
 
 
@@ -112,6 +121,7 @@ def is_nvidia_gpu_present() -> bool:
             ["nvidia-smi"],
             capture_output=True,
             timeout=5,
+            env=_external_python_env(),
             **_subprocess_hide_window_kwargs(),
         )
         if result.returncode == 0:
@@ -139,7 +149,7 @@ def _get_target_dir() -> Path | None:
         if snap_user_data:
             return Path(snap_user_data) / "cuda_packages"
         return Path.home() / ".local" / "share" / "buzz" / "cuda_packages"
-    if is_flatpak():
+    if is_flatpak() or is_appimage():
         xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
         return Path(xdg_data) / "buzz" / "cuda_packages"
     return None
@@ -259,17 +269,65 @@ def install_cuda(progress_callback=None):
     report("CUDA installation complete. Please restart Buzz to enable GPU acceleration.")
 
 
+def _bundle_dirs() -> list[str]:
+    """Directories belonging to the running bundle (PyInstaller / AppImage)."""
+    dirs = []
+    for value in (getattr(sys, "_MEIPASS", None), os.environ.get("APPDIR")):
+        if value:
+            dirs.append(os.path.realpath(value))
+    if getattr(sys, "frozen", False):
+        dirs.append(os.path.realpath(Path(sys.executable).parent))
+    return dirs
+
+
+def _external_python_env() -> dict[str, str]:
+    """Environment for running a Python interpreter outside our bundle.
+
+    Snap, Flatpak and the AppImage all point the dynamic linker and Python at
+    the bundled runtime (LD_LIBRARY_PATH, PYTHONHOME, PYTHONPATH). Inheriting
+    those makes a system interpreter load our bundled libraries, which fails
+    with errors like "undefined symbol: XML_SetHashSalt16Bytes" when the two
+    versions of a library disagree. PyInstaller also saves the pre-launch
+    values in *_ORIG, so prefer those when present.
+    """
+    env = dict(os.environ)
+    bundle_dirs = _bundle_dirs()
+
+    for name in ("LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "LD_PRELOAD", "PYTHONPATH"):
+        original = env.pop(f"{name}_ORIG", None)
+        value = original if original is not None else env.get(name)
+        if value is None:
+            continue
+        kept = [
+            entry for entry in value.split(os.pathsep)
+            if entry and not any(
+                os.path.realpath(entry).startswith(d) for d in bundle_dirs
+            )
+        ]
+        if kept:
+            env[name] = os.pathsep.join(kept)
+        else:
+            env.pop(name, None)
+
+    # Never let the external interpreter use our bundled stdlib.
+    env.pop("PYTHONHOME", None)
+    return env
+
+
 def _ensure_pip(python: str) -> list[str]:
     """Return [python, '-m', 'pip'], bootstrapping pip via ensurepip if needed."""
     hide_kwargs = _subprocess_hide_window_kwargs()
+    env = _external_python_env()
     pip_cmd = [python, "-m", "pip"]
-    probe = subprocess.run(pip_cmd + ["--version"], capture_output=True, timeout=15, **hide_kwargs)
+    probe = subprocess.run(
+        pip_cmd + ["--version"], capture_output=True, timeout=15, env=env, **hide_kwargs
+    )
     if probe.returncode == 0:
         return pip_cmd
     logger.info("pip not found for %s, bootstrapping via ensurepip...", python)
     bootstrap = subprocess.run(
         [python, "-m", "ensurepip", "--upgrade"],
-        capture_output=True, timeout=60, **hide_kwargs,
+        capture_output=True, timeout=60, env=env, **hide_kwargs,
     )
     if bootstrap.returncode != 0:
         raise RuntimeError(
@@ -303,17 +361,39 @@ def _get_pip_cmd() -> list[str]:
         bundled_python = internal_dir / "python" / python_name
         if bundled_python.is_file():
             return _ensure_pip(str(bundled_python))
-        # Fallback: look in PATH
+        # Fallback: look in PATH, but only accept an interpreter whose version
+        # matches the one Buzz was frozen with — the CUDA wheels are ABI
+        # specific, so a mismatch would install packages we cannot import.
         for candidate in (f"python{version}", "python3", "python"):
             python = shutil.which(candidate)
-            if python:
+            if python and _python_version(python) == version:
                 return _ensure_pip(python)
         raise RuntimeError(
-            "Could not find a Python interpreter. "
+            f"Could not find a Python {version} interpreter. "
             f"Please install Python {version} and try again."
         )
 
     return _ensure_pip(sys.executable)
+
+
+def _python_version(python: str) -> str | None:
+    """Return the "major.minor" version of an interpreter, or None if unusable."""
+    try:
+        result = subprocess.run(
+            [python, "-c", "import sys; print('%d.%d' % sys.version_info[:2])"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=_external_python_env(),
+            **_subprocess_hide_window_kwargs(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        logger.warning("Could not determine version of %s: %s", python, exc)
+        return None
+    if result.returncode != 0:
+        logger.warning("Could not determine version of %s: %s", python, result.stderr.strip())
+        return None
+    return result.stdout.strip()
 
 
 def _subprocess_hide_window_kwargs() -> dict[str, Any]:
@@ -336,6 +416,7 @@ def _pip_install(packages, extra_args=None, progress_callback=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        env=_external_python_env(),
         **_subprocess_hide_window_kwargs(),
     )
     for line in process.stdout:

@@ -1,3 +1,4 @@
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ from buzz.cuda_manager import (
     _find_stale_cuda_dirs,
     _get_install_target,
     _get_pip_cmd,
+    _external_python_env,
     _get_target_dir,
     _in_virtualenv,
     _pip_install,
@@ -162,11 +164,22 @@ class TestShouldOfferCudaPrompt:
         monkeypatch.setenv("FLATPAK_ID", "io.github.chidiwilliams.buzz")
         assert should_offer_cuda_prompt() is True
 
+    def test_returns_true_on_linux_appimage(self, monkeypatch):
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.delenv("SNAP", raising=False)
+        monkeypatch.delenv("SNAP_NAME", raising=False)
+        monkeypatch.delenv("FLATPAK_ID", raising=False)
+        monkeypatch.setenv("APPIMAGE", "/tmp/Buzz.AppImage")
+        monkeypatch.setenv("APPDIR", "/tmp/.mount_Buzz")
+        assert should_offer_cuda_prompt() is True
+
     def test_returns_false_on_linux_bare(self, monkeypatch):
         monkeypatch.setattr(sys, "platform", "linux")
         monkeypatch.delenv("SNAP", raising=False)
         monkeypatch.delenv("SNAP_NAME", raising=False)
         monkeypatch.delenv("FLATPAK_ID", raising=False)
+        monkeypatch.delenv("APPIMAGE", raising=False)
+        monkeypatch.delenv("APPDIR", raising=False)
         assert should_offer_cuda_prompt() is False
 
     def test_returns_false_on_macos(self, monkeypatch):
@@ -316,6 +329,36 @@ class TestSubprocessHideWindowKwargs:
             assert "creationflags" in result
 
 
+class TestExternalPythonEnv:
+    def test_strips_bundle_dirs_from_loader_vars(self, monkeypatch, tmp_path):
+        appdir = tmp_path / "mount"
+        (appdir / "usr" / "bin").mkdir(parents=True)
+        monkeypatch.setenv("APPIMAGE", str(tmp_path / "Buzz.AppImage"))
+        monkeypatch.setenv("APPDIR", str(appdir))
+        monkeypatch.setenv(
+            "LD_LIBRARY_PATH", f"{appdir}/usr/bin{os.pathsep}/opt/other/lib"
+        )
+        monkeypatch.setenv("PYTHONPATH", f"{appdir}/usr/bin")
+        monkeypatch.setenv("PYTHONHOME", f"{appdir}/usr/bin")
+
+        env = _external_python_env()
+
+        assert env["LD_LIBRARY_PATH"] == "/opt/other/lib"
+        assert "PYTHONPATH" not in env
+        assert "PYTHONHOME" not in env
+
+    def test_prefers_pyinstaller_orig_values(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("APPDIR", str(tmp_path))
+        monkeypatch.setenv("APPIMAGE", str(tmp_path / "Buzz.AppImage"))
+        monkeypatch.setenv("LD_LIBRARY_PATH", str(tmp_path))
+        monkeypatch.setenv("LD_LIBRARY_PATH_ORIG", "/opt/host/lib")
+
+        env = _external_python_env()
+
+        assert env["LD_LIBRARY_PATH"] == "/opt/host/lib"
+        assert "LD_LIBRARY_PATH_ORIG" not in env
+
+
 class TestGetPipCmd:
     def test_returns_sys_executable_when_pip_available(self):
         with patch("subprocess.run") as mock_run:
@@ -331,6 +374,16 @@ class TestGetPipCmd:
         with patch("subprocess.run", side_effect=responses):
             cmd = _get_pip_cmd()
             assert cmd == [sys.executable, "-m", "pip"]
+
+    def test_frozen_rejects_interpreter_with_mismatched_version(self, monkeypatch):
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", "/nonexistent", raising=False)
+        version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        other = "9.9" if version != "9.9" else "9.8"
+        with patch("shutil.which", return_value="/usr/bin/python3"):
+            with patch("buzz.cuda_manager._python_version", return_value=other):
+                with pytest.raises(RuntimeError, match="Could not find a Python"):
+                    _get_pip_cmd()
 
     def test_raises_when_ensurepip_also_fails(self):
         responses = [

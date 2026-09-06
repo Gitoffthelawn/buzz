@@ -29,8 +29,11 @@ def _get_cuda_target_dir() -> Path | None:
     snap_user_data = os.environ.get("SNAP_USER_DATA")
     if snap_user_data and os.environ.get("SNAP_NAME") == "buzz":
         return Path(snap_user_data) / "cuda_packages"
-    flatpak_id = os.environ.get("FLATPAK_ID")
-    if flatpak_id:
+    # Flatpak and AppImage share a target dir under XDG_DATA_HOME
+    # (see _get_target_dir() in buzz/cuda_manager.py).
+    if os.environ.get("FLATPAK_ID") or (
+        "APPIMAGE" in os.environ and "APPDIR" in os.environ
+    ):
         xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
         return Path(xdg_data) / "buzz" / "cuda_packages"
     return None
