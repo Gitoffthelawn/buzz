@@ -357,10 +357,17 @@ def _get_pip_cmd() -> list[str]:
     if getattr(sys, "frozen", False):
         # PyInstaller extracts bundled data to sys._MEIPASS (_internal dir)
         internal_dir = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
-        python_name = "python.exe" if sys.platform == "win32" else "python3"
-        bundled_python = internal_dir / "python" / python_name
-        if bundled_python.is_file():
-            return _ensure_pip(str(bundled_python))
+        # Windows keeps python.exe at the root of the bundled tree; the Linux
+        # standalone build keeps its usual bin/ + lib/ layout, which its RPATH
+        # ($ORIGIN/../lib) depends on.
+        if sys.platform == "win32":
+            bundled_names = ("python.exe",)
+        else:
+            bundled_names = (f"bin/python{version}", "bin/python3")
+        for name in bundled_names:
+            bundled_python = internal_dir.joinpath("python", *name.split("/"))
+            if bundled_python.is_file():
+                return _ensure_pip(str(bundled_python))
         # Fallback: look in PATH, but only accept an interpreter whose version
         # matches the one Buzz was frozen with — the CUDA wheels are ABI
         # specific, so a mismatch would install packages we cannot import.

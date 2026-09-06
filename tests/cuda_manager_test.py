@@ -375,6 +375,19 @@ class TestGetPipCmd:
             cmd = _get_pip_cmd()
             assert cmd == [sys.executable, "-m", "pip"]
 
+    def test_frozen_uses_bundled_linux_interpreter(self, monkeypatch, tmp_path):
+        version = f"{sys.version_info.major}.{sys.version_info.minor}"
+        bundled = tmp_path / "python" / "bin" / f"python{version}"
+        bundled.parent.mkdir(parents=True)
+        bundled.touch()
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            assert _get_pip_cmd() == [str(bundled), "-m", "pip"]
+
     def test_frozen_rejects_interpreter_with_mismatched_version(self, monkeypatch):
         monkeypatch.setattr(sys, "frozen", True, raising=False)
         monkeypatch.setattr(sys, "_MEIPASS", "/nonexistent", raising=False)

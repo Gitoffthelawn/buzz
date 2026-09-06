@@ -50,6 +50,64 @@ mkdir -p "$APPDIR/usr/bin" \
 # Copy entire PyInstaller output into usr/bin/
 cp -a "$PROJECT_DIR/dist/Buzz/." "$APPDIR/usr/bin/"
 
+# ── Step 2b: Bundle a standalone Python for runtime pip installs ────────────
+# Buzz installs CUDA support at runtime with pip (see buzz/cuda_manager.py),
+# which needs a real interpreter — the frozen Buzz binary cannot run -m pip,
+# and a host python is both optional and usually the wrong version for the
+# ABI-specific CUDA wheels. Ship the uv-managed interpreter Buzz was frozen
+# with, keeping its bin/ + lib/ layout so its $ORIGIN/../lib RPATH resolves.
+echo "==> Bundling standalone Python interpreter..."
+cd "$PROJECT_DIR"
+PY_VERSION="$(uv run python -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+PY_DEST="$APPDIR/usr/bin/_internal/python"
+
+# Always take uv's managed (python-build-standalone) build: it is relocatable
+# and keeps libpython next to the stdlib, unlike a distro interpreter, which
+# would leave the bundled tree depending on the build machine's /usr.
+uv python install --managed-python "$PY_VERSION" >/dev/null
+PY_BIN="$(uv python find --managed-python "$PY_VERSION")"
+PY_BASE="$("$PY_BIN" -c 'import sys; print(sys.base_prefix)')"
+
+if [ ! -x "$PY_BASE/bin/python$PY_VERSION" ] || ! compgen -G "$PY_BASE/lib/libpython*.so*" >/dev/null; then
+    echo "ERROR: $PY_BASE is not a relocatable standalone Python $PY_VERSION." >&2
+    exit 1
+fi
+
+rm -rf "$PY_DEST"
+mkdir -p "$PY_DEST/bin" "$PY_DEST/lib"
+cp -a "$PY_BASE/bin/python$PY_VERSION" "$PY_DEST/bin/"
+ln -sf "python$PY_VERSION" "$PY_DEST/bin/python3"
+# libpython lives next to the stdlib; both are found via the RPATH above.
+cp -a "$PY_BASE"/lib/libpython*.so* "$PY_DEST/lib/" 2>/dev/null || true
+cp -a "$PY_BASE/lib/python$PY_VERSION" "$PY_DEST/lib/"
+
+# Trim what a pip subprocess never needs (~40 MB of stdlib).
+rm -rf "$PY_DEST/lib/python$PY_VERSION/test" \
+       "$PY_DEST/lib/python$PY_VERSION/idlelib" \
+       "$PY_DEST/lib/python$PY_VERSION/tkinter" \
+       "$PY_DEST/lib/python$PY_VERSION/turtledemo" \
+       "$PY_DEST/lib/python$PY_VERSION"/config-*
+find "$PY_DEST" -name '__pycache__' -type d -prune -exec rm -rf {} +
+
+# uv's builds are marked as externally managed; the copy is ours to install
+# CUDA wheels into, so drop the marker.
+rm -f "$PY_DEST/lib/python$PY_VERSION/EXTERNALLY-MANAGED"
+
+# Make sure pip is present now: the mounted AppImage is read-only, so ensurepip
+# cannot bootstrap it on the user's machine.
+if ! env -u LD_LIBRARY_PATH -u PYTHONPATH -u PYTHONHOME \
+        "$PY_DEST/bin/python3" -m pip --version >/dev/null 2>&1; then
+    env -u LD_LIBRARY_PATH -u PYTHONPATH -u PYTHONHOME \
+        "$PY_DEST/bin/python3" -m ensurepip --upgrade >/dev/null
+fi
+env -u LD_LIBRARY_PATH -u PYTHONPATH -u PYTHONHOME \
+    "$PY_DEST/bin/python3" -m pip --version
+
+# Smoke-test the trimmed tree, including the modules pip pulls in (ssl for
+# downloads, expat via xmlrpc) — a missing one only shows up at install time.
+env -u LD_LIBRARY_PATH -u PYTHONPATH -u PYTHONHOME \
+    "$PY_DEST/bin/python3" -c 'import ssl, lzma, ctypes, sqlite3, xml.parsers.expat'
+
 # ── Step 3: Desktop integration ─────────────────────────────────────────────
 # Desktop file — Exec must be just the binary name for AppImage spec
 cat > "$APPDIR/Buzz.desktop" << 'EOF'
