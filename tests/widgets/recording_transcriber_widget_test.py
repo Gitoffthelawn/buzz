@@ -109,7 +109,9 @@ class TestRecordingTranscriberWidget:
 
             assert len(widget.transcription_text_box.toPlainText()) > 0
 
-            with open(widget.transcript_export_file, 'r') as file:
+            # Exports are written as UTF-8; reading with the locale default
+            # (e.g. cp1257) blows up on any non-ASCII transcript text.
+            with open(widget.transcript_export_file, 'r', encoding='utf-8') as file:
                 contents = file.read()
                 assert len(contents) > 0
 
