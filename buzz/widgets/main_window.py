@@ -484,6 +484,12 @@ class MainWindow(QMainWindow):
         pass
 
     def on_task_completed(self, task: FileTranscriptionTask, segments: List[Segment]):
+        # Stop may have landed while this result was already queued across
+        # threads; a canceled task must not be resurrected as completed.
+        if task.uid in self.transcriber_worker.canceled_tasks:
+            self.quit_if_all_tasks_done(task)
+            return
+
         # Handle skipped tasks (e.g. plugin detected file already transcribed)
         if task.status == FileTranscriptionTask.Status.SKIPPED:
             self.transcription_service.update_transcription_as_skipped(task.uid, segments)

@@ -73,6 +73,11 @@ class TestFindStaleCudaDirs:
 
         assert set(stale) == {current / "cuda_packages", old / "cuda_packages"}
 
+    @pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="Creating symlinks needs a privilege the CI user does not hold, "
+        "and the snap layout this covers only exists on Linux",
+    )
     def test_skips_the_current_symlink(self, tmp_path, monkeypatch):
         # ~/snap/<name>/current symlinks to the active revision; following it
         # would list the same directory twice under two names.

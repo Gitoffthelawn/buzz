@@ -664,7 +664,10 @@ class FileTranscriberQueueWorker(QObject):
 
     @pyqtSlot(tuple)
     def on_task_progress(self, progress: Tuple[int, int]):
-        if self.current.task is not None:
+        if (
+            self.current.task is not None
+            and self.current.task.uid not in self.canceled_tasks
+        ):
             self.task_progress.emit(self.current.task, progress[0] / progress[1])
 
     def on_task_download_progress(self, fraction_downloaded: float):
@@ -673,7 +676,13 @@ class FileTranscriberQueueWorker(QObject):
 
     @pyqtSlot(list)
     def on_task_completed(self, segments: List[Segment]):
-        if self.current.task is not None:
+        # A transcriber that finished just as Stop was pressed still emits its
+        # result. Dropping it here keeps the canceled status from being
+        # overwritten with "completed".
+        if (
+            self.current.task is not None
+            and self.current.task.uid not in self.canceled_tasks
+        ):
             self.task_completed.emit(self.current.task, segments)
 
         if self.speech_path is not None:
